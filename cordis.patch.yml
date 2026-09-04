@@ -1,0 +1,4 @@
+# Insert the Host plugin that serves the Archive settings page.
+- insert:
+    - id: dsh-session-vault
+      name: dsh-session-vault

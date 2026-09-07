@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-A DeepSeek Harness settings plugin. It lists and deletes sessions the sidebar hides: archived sessions, or blank sessions whose log has no `turn/start`. Subagent sessions are excluded.
+A DeepSeek Harness settings plugin. It lists and deletes sessions the sidebar hides: archived sessions, or blank sessions whose log has no `turn/start`. A session whose log cannot be read is listed too, marked “Unreadable” — this page is the only surface left that can remove it. Subagent sessions are excluded.
 
 Deleting a session:
 
@@ -53,5 +53,7 @@ Restart `dsh web`.
 
 ## Limits
 
-- Requires the JSONL persistence backend (`dsh web` default). SQLite session stores have no per-session files, so delete is refused.
+- Requires the JSONL persistence backend (`dsh web` default). Delete refuses any backend whose `locate()` does not answer `kind: 'jsonl'` with a session-owned directory, so a store with no per-session files (SQLite) or a shared artifact is never removed.
 - Deletes go through Connection RPC with `authority: loopback`, so only the local settings page can call them.
+- One `vault.delete` call accepts at most 200 ids.
+- Removing an id from the archive ledger has no published API upstream (`archiveSession` ships without a counterpart), so `lib/registry-compat.js` writes `WorkspaceRegistry` state directly. That write does not run on the registry's own operation queue: a workspace mutation landing in the same instant is reported as `registry-unsupported` rather than silently overwritten. A DSH build that changes those internals fails loud instead of leaving a deleted session archived.

@@ -4,7 +4,9 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { deleteSessionDirectory, deleteVaultSession, forgetWorkspaceAccount } from '../lib/delete.js'
+import {
+  deleteSessionDirectory, deleteVaultSession, forgetWorkspaceAccount, resolveSessionDirectory,
+} from '../lib/delete.js'
 import { findLifecycleDisposer, disposeLiveAgent } from '../lib/dispose-agent.js'
 
 const EFFECT = Symbol.for('cordis.effect')
@@ -54,6 +56,79 @@ test('deleteVaultSession refuses the current session before touching disk', asyn
     deleteVaultSession({}, 's1', { keepSessionId: 's1' }),
     /current session/,
   )
+})
+
+test('resolveSessionDirectory refuses a backend that does not own a JSONL artifact', () => {
+  for (const location of [undefined, { kind: 'sqlite', path: '/data/sessions.db' }, { kind: 'jsonl' }]) {
+    assert.throws(
+      () => resolveSessionDirectory({ sessionPersistence: { locate: () => location } }, { id: 's1' }),
+      (error) => error.code === 'backend-unsupported',
+    )
+  }
+})
+
+test('resolveSessionDirectory refuses a path whose parent is not session-owned', () => {
+  // A shared artifact would otherwise have its containing directory removed.
+  for (const path of ['/sessions.db', '/data/sessions.db', '/root/project/unrelated/session.jsonl']) {
+    assert.throws(
+      () => resolveSessionDirectory(
+        { sessionPersistence: { locate: () => ({ kind: 'jsonl', path }) } },
+        { id: 's1' },
+      ),
+      (error) => error.code === 'backend-unsupported',
+      `expected ${path} to be refused`,
+    )
+  }
+})
+
+test('resolveSessionDirectory accepts the JSONL project/session layout', () => {
+  const ctx = {
+    sessionPersistence: {
+      locate: () => ({ kind: 'jsonl', path: '/root/--work--/s1/session.jsonl.zstd' }),
+    },
+  }
+  assert.equal(resolveSessionDirectory(ctx, { id: 's1' }), '/root/--work--/s1')
+})
+
+test('deleteVaultSession leaves the ledger alone when the session cannot be read', async () => {
+  const detached = []
+  const registry = {
+    archivedSessionIds: ['ghost'],
+    state: { archivedSessionIds: ['ghost'] },
+    list() { return [{ async detachSession(id) { detached.push(id) } }] },
+    async setState(next) {
+      this.state = next
+      this.archivedSessionIds = next.archivedSessionIds
+    },
+  }
+  const ctx = {
+    sessions: { get() { return undefined } },
+    sessionQuery: { async filterSessions() { return [] } },
+    workspaceRegistry: registry,
+  }
+  await assert.rejects(deleteVaultSession(ctx, 'ghost'), (error) => error.code === 'session-not-found')
+  // Dropping the id here would strand a log no surface can reach afterwards.
+  assert.deepEqual(registry.archivedSessionIds, ['ghost'])
+  assert.deepEqual(detached, [])
+})
+
+test('deleteVaultSession reads one header by id rather than listing the corpus', async () => {
+  const calls = []
+  const ctx = {
+    sessions: { get() { return undefined } },
+    sessionQuery: {
+      async filterSessions(filters) {
+        calls.push(filters)
+        return []
+      },
+      async listSessions() {
+        throw new Error('listSessions must not be used when filterSessions exists')
+      },
+    },
+    workspaceRegistry: { archivedSessionIds: [], list() { return [] } },
+  }
+  await assert.rejects(deleteVaultSession(ctx, 'wanted'), /not found/)
+  assert.deepEqual(calls, [[{ kind: 'id', values: ['wanted'] }]])
 })
 
 test('findLifecycleDisposer reads the public effect label on another fiber', () => {

@@ -42,7 +42,7 @@ function formatTime(createdAt) {
   }
 }
 
-function SessionRow({ row, checked, disabled, t, onToggle, onDelete }) {
+function SessionRow({ row, checked, disabled, busy, t, onToggle, onDelete }) {
   const title = row.title?.trim() ? row.title : t('untitled')
   const folder = cwdLeaf(row.cwd)
   return h('li', { className: disabled ? 'dsh-sv-row is-current' : 'dsh-sv-row' },
@@ -50,7 +50,7 @@ function SessionRow({ row, checked, disabled, t, onToggle, onDelete }) {
       type: 'checkbox',
       className: 'dsh-sv-check',
       checked,
-      disabled,
+      disabled: disabled || busy,
       'aria-label': title,
       onChange: () => onToggle(row.sessionId),
     }),
@@ -59,6 +59,7 @@ function SessionRow({ row, checked, disabled, t, onToggle, onDelete }) {
         h('span', { className: 'dsh-sv-name', title }, title),
         row.archived ? h('span', { className: 'dsh-sv-badge' }, t('archived')) : null,
         row.blank ? h('span', { className: 'dsh-sv-badge' }, t('blank')) : null,
+        row.probeFailed ? h('span', { className: 'dsh-sv-badge' }, t('unknown')) : null,
         row.live ? h('span', { className: 'dsh-sv-badge' }, t('live')) : null,
         disabled ? h('span', { className: 'dsh-sv-badge' }, t('current')) : null,
       ),
@@ -73,14 +74,22 @@ function SessionRow({ row, checked, disabled, t, onToggle, onDelete }) {
     h(Button, {
       variant: 'ghost',
       size: 'sm',
-      disabled,
+      disabled: disabled || busy,
       onClick: () => onDelete([row.sessionId]),
     }, t('delete')),
   )
 }
 
-export function ArchiveSection({ t, rpcCall, useSessions }) {
-  const currentId = useSessions((s) => s.current)
+/**
+ * Stand-in for the `ui-session` standard prop. The settings page is useful
+ * without it — it only loses the "this is the session you are looking at"
+ * guard — so a deployment that does not mount `ui-session` degrades instead of
+ * throwing on render.
+ */
+const NO_CURRENT_SESSION = () => undefined
+
+export function ArchiveSection({ t, rpcCall, useSessions = NO_CURRENT_SESSION }) {
+  const currentId = useSessions((s) => s?.current)
   const [status, setStatus] = useState('loading')
   const [error, setError] = useState(null)
   const [items, setItems] = useState([])
@@ -93,18 +102,17 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
   const [acknowledged, setAcknowledged] = useState(false)
   const [busy, setBusy] = useState(false)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ keepPage = false } = {}) => {
     setStatus('loading')
     setError(null)
     try {
       const result = await rpcCall(VAULT_ENDPOINTS.list, {})
       if (!result?.ok) throw new Error(result?.error?.message ?? t('error'))
-      setItems(result.value.items ?? [
-        ...(result.value.archived ?? []),
-        ...(result.value.blank ?? []),
-      ])
+      setItems(result.value.items ?? [])
       setSelected(new Set())
-      setPage(1)
+      // A refresh keeps the reader where they were; `paginate` clamps a page
+      // that no longer exists.
+      if (!keepPage) setPage(1)
       setStatus('ready')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -115,6 +123,14 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
   useEffect(() => {
     void load()
   }, [load])
+
+  /** Filters change what is visible, so they also drop selections made under the old filter. */
+  const resetView = useCallback(() => {
+    setPage(1)
+    setSelected(new Set())
+  }, [])
+
+  const dateRangeInvalid = fromDate !== '' && toDate !== '' && fromDate > toDate
 
   const filtered = useMemo(() => {
     const range = dateRangeMs(fromDate, toDate)
@@ -156,7 +172,10 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
   }, [pageIds])
 
   const requestDelete = useCallback((ids) => {
-    const eligible = ids.filter((id) => id !== currentId)
+    // Only rows the reader can currently see are deletable, so a stale
+    // selection can never widen the confirmed set beyond what is on screen.
+    const visible = new Set(filtered.map((row) => row.sessionId))
+    const eligible = ids.filter((id) => id !== currentId && visible.has(id))
     if (eligible.length === 0) {
       setError(t('noneSelected'))
       return
@@ -164,7 +183,7 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
     setError(null)
     setAcknowledged(false)
     setPending(eligible)
-  }, [currentId, t])
+  }, [currentId, filtered, t])
 
   const confirmDelete = useCallback(async () => {
     if (!pending || pending.length === 0) return
@@ -178,7 +197,7 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
       const failed = (result.value.results ?? []).filter((row) => row.ok !== true)
       setPending(null)
       setAcknowledged(false)
-      await load()
+      await load({ keepPage: true })
       if (failed.length > 0) {
         setError(`${fmt(t, 'deleteFailed', { n: failed.length })} ${failed.map((row) => row.error).filter(Boolean).join(' ')}`)
       }
@@ -214,7 +233,8 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
             key: id,
             variant: kind === id ? 'primary' : 'ghost',
             size: 'sm',
-            onClick: () => { setKind(id); setPage(1) },
+            disabled: busy,
+            onClick: () => { setKind(id); resetView() },
           }, label),
         ),
       ),
@@ -224,7 +244,8 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
           className: 'dsh-sv-date',
           'aria-label': t('dateFrom'),
           value: fromDate,
-          onChange: (event) => { setFromDate(event.target.value); setPage(1) },
+          disabled: busy,
+          onChange: (event) => { setFromDate(event.target.value); resetView() },
         }),
         h('span', { className: 'dsh-sv-muted' }, '–'),
         h('input', {
@@ -232,27 +253,40 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
           className: 'dsh-sv-date',
           'aria-label': t('dateTo'),
           value: toDate,
-          onChange: (event) => { setToDate(event.target.value); setPage(1) },
+          disabled: busy,
+          onChange: (event) => { setToDate(event.target.value); resetView() },
         }),
         fromDate || toDate
           ? h(Button, {
             variant: 'ghost',
             size: 'sm',
-            onClick: () => { setFromDate(''); setToDate(''); setPage(1) },
+            disabled: busy,
+            onClick: () => { setFromDate(''); setToDate(''); resetView() },
           }, t('clearDates'))
           : null,
       ),
     ),
+    dateRangeInvalid ? h('p', { className: 'dsh-sv-muted' }, t('dateRangeInvalid')) : null,
     h('div', { className: 'dsh-sv-chrome' },
       h('div', { className: 'dsh-sv-cluster' },
-        h(Button, { variant: 'outline', size: 'sm', onClick: togglePage, disabled: pageIds.length === 0 }, t('selectPage')),
+        h(Button, {
+          variant: 'outline',
+          size: 'sm',
+          onClick: togglePage,
+          disabled: pageIds.length === 0 || busy,
+        }, t('selectPage')),
         h(Button, {
           variant: 'primary',
           size: 'sm',
           disabled: selected.size === 0 || busy,
           onClick: () => requestDelete([...selected]),
         }, t('deleteSelected')),
-        h(Button, { variant: 'ghost', size: 'sm', onClick: () => void load(), disabled: busy }, t('refresh')),
+        h(Button, {
+          variant: 'ghost',
+          size: 'sm',
+          onClick: () => void load({ keepPage: true }),
+          disabled: busy,
+        }, t('refresh')),
       ),
       h('span', { className: 'dsh-sv-muted' },
         selected.size > 0
@@ -267,6 +301,7 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
           key: row.sessionId,
           row,
           t,
+          busy,
           checked: selected.has(row.sessionId),
           disabled: row.sessionId === currentId,
           onToggle: toggle,
@@ -279,13 +314,13 @@ export function ArchiveSection({ t, rpcCall, useSessions }) {
           h(Button, {
             variant: 'outline',
             size: 'sm',
-            disabled: paged.page <= 1,
+            disabled: paged.page <= 1 || busy,
             onClick: () => setPage(paged.page - 1),
           }, t('prev')),
           h(Button, {
             variant: 'outline',
             size: 'sm',
-            disabled: paged.page >= paged.pageCount,
+            disabled: paged.page >= paged.pageCount || busy,
             onClick: () => setPage(paged.page + 1),
           }, t('next')),
         ),

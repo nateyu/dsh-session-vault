@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { Config } from '../lib/config.js'
 import {
-  eventsAreBlank, shouldListInVault, mapPool, titleMapFromObservations,
+  eventsAreBlank, liveLogEvents, shouldListInVault, mapPool, titleMapFromObservations,
   sessionIsBlank, probeSessionBlank, listVaultSessions,
 } from '../lib/list.js'
 
@@ -57,6 +57,56 @@ test('sessionIsBlank uses live events without inspect', async () => {
     },
   }
   assert.equal(await sessionIsBlank(ctx, { header: { id: 'live' } }, undefined), true)
+})
+
+test('liveLogEvents does not treat a missing events getter as an empty log', () => {
+  assert.equal(liveLogEvents({ seq: 12 }), undefined)
+  assert.equal(liveLogEvents({ events: undefined }), undefined)
+  assert.deepEqual(liveLogEvents({
+    snapshotEvents() { return [{ type: 'turn/start' }] },
+  }), [{ type: 'turn/start' }])
+})
+
+test('sessionIsBlank reads snapshotEvents when Session.events is gone', async () => {
+  const ctx = {
+    sessions: {
+      get(id) {
+        return id === 'live'
+          ? { snapshotEvents() { return [{ type: 'user/message' }, { type: 'turn/start' }] } }
+          : undefined
+      },
+    },
+    sessionQuery: {
+      async listEvents() { return [] },
+    },
+  }
+  assert.equal(await sessionIsBlank(ctx, { header: { id: 'live' } }, undefined), false)
+})
+
+test('sessionIsBlank does not mark a live conversation blank when events is missing', async () => {
+  const ctx = {
+    sessions: {
+      get() { return { seq: 12 } },
+    },
+    sessionQuery: {
+      async listEvents() { return [{ type: 'turn/start' }] },
+    },
+  }
+  assert.equal(await sessionIsBlank(ctx, { header: { id: 'live' } }, undefined), false)
+})
+
+test('sessionIsBlank prefers the sidebar list-metadata projection', async () => {
+  const ctx = {
+    sessions: {
+      get() { return { events: [] } },
+    },
+    sessionProjections: {
+      cachedSnapshot() {
+        return { values: { sessionListMetadata: { blank: false, lastPromptAt: 1 } } }
+      },
+    },
+  }
+  assert.equal(await sessionIsBlank(ctx, { header: { id: 'live' } }, undefined), false)
 })
 
 test('probeSessionBlank reports an unreadable log instead of rejecting', async () => {

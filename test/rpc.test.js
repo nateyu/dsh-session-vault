@@ -3,18 +3,34 @@ import assert from 'node:assert/strict'
 
 import { VAULT_ENDPOINTS, VAULT_RPC_CHANNEL } from '../lib/api.js'
 import { MAX_DELETE_BATCH } from '../lib/config.js'
-import { installVaultRpc, parseSessionIds } from '../lib/rpc.js'
+import { inject } from '../lib/index.js'
+import { createVaultRpcHandler, installVaultRpc, parseSessionIds } from '../lib/rpc.js'
 
-/**
- * Register the handler on a ctx and hand it back for direct invocation.
- * @param {object} ctx
- */
-function handlerFor(ctx) {
-  let handler
-  ctx.connection = { rpc: { handle(_channel, fn) { handler = fn; return () => {} } } }
-  installVaultRpc(ctx)
-  return handler
+function handlerFor(ctx = {}) {
+  return createVaultRpcHandler(ctx)
 }
+
+function mountCtx() {
+  const routes = []
+  const ctx = {
+    webServer: {
+      register(route) {
+        routes.push(route)
+        return () => {}
+      },
+    },
+    connection: {
+      requestRejection() { return undefined },
+    },
+  }
+  ctx.routes = routes
+  return ctx
+}
+
+test('host plugin injects webServer so the RPC prefix can mount', () => {
+  assert.ok(inject.includes('webServer'))
+  assert.ok(inject.includes('connection'))
+})
 
 test('parseSessionIds rejects empty or non-string ids', () => {
   assert.throws(() => parseSessionIds({}), /non-empty/)
@@ -29,68 +45,42 @@ test('parseSessionIds drops repeats and bounds the batch', () => {
   assert.throws(() => parseSessionIds({ sessionIds: tooMany }), /at most/)
 })
 
-test('installVaultRpc registers a loopback channel and lists via the handler', async () => {
-  const calls = []
-  const ctx = {
-    connection: {
-      rpc: {
-        handle(channel, handler, options) {
-          calls.push({ channel, options })
-          ctx.handler = handler
-          return () => {}
-        },
-      },
-    },
-    workspaceRegistry: { archivedSessionIds: [] },
-    sessions: { get() { return undefined } },
-    sessionQuery: {
-      async listSessions() { return [] },
-      async readTitleSnapshots() { return [] },
-    },
+test('installVaultRpc registers the channel on webServer', async () => {
+  const ctx = mountCtx()
+  ctx.workspaceRegistry = { archivedSessionIds: [] }
+  ctx.sessions = { get() { return undefined } }
+  ctx.sessionQuery = {
+    async listSessions() { return [] },
+    async readTitleSnapshots() { return [] },
   }
   installVaultRpc(ctx)
-  assert.equal(calls[0].channel, VAULT_RPC_CHANNEL)
-  assert.deepEqual(calls[0].options, { authority: 'loopback' })
-  const listed = await ctx.handler(VAULT_ENDPOINTS.list, {})
+  assert.equal(ctx.routes[0].kind, 'prefix')
+  assert.equal(ctx.routes[0].path, VAULT_RPC_CHANNEL)
+  const listed = await createVaultRpcHandler(ctx)(VAULT_ENDPOINTS.list, {})
   assert.equal(listed.ok, true)
   assert.deepEqual(listed.value, { items: [] })
 })
 
 test('unknown endpoints and cancelled signals fail loudly', async () => {
-  const ctx = {
-    connection: {
-      rpc: {
-        handle(_channel, handler) {
-          ctx.handler = handler
-          return () => {}
-        },
-      },
-    },
-  }
-  installVaultRpc(ctx)
+  const handler = handlerFor({})
   const aborted = AbortSignal.abort()
-  const cancelled = await ctx.handler(VAULT_ENDPOINTS.list, {}, aborted)
+  const cancelled = await handler(VAULT_ENDPOINTS.list, {}, aborted)
   assert.equal(cancelled.ok, false)
   assert.equal(cancelled.error.code, 'cancelled')
-  const unknown = await ctx.handler('vault.nope', {})
+  const unknown = await handler('vault.nope', {})
   assert.equal(unknown.ok, false)
   assert.equal(unknown.error.code, 'bad-request')
 })
 
-test('installVaultRpc fails loud when Connection RPC is missing', () => {
-  assert.throws(() => installVaultRpc({}), /rpc.handle/)
+test('installVaultRpc fails loud when webServer is missing', () => {
+  assert.throws(
+    () => installVaultRpc({ connection: { requestRejection() { return undefined } } }),
+    /webServer.register/,
+  )
 })
 
 test('vault.delete reports per-id results and keeps going after one failure', async () => {
-  const ctx = {
-    connection: {
-      rpc: {
-        handle(_channel, handler) {
-          ctx.handler = handler
-          return () => {}
-        },
-      },
-    },
+  const handler = handlerFor({
     sessions: { get() { return undefined } },
     sessionQuery: {
       async listSessions() { return [] },
@@ -99,9 +89,8 @@ test('vault.delete reports per-id results and keeps going after one failure', as
       archivedSessionIds: [],
       list() { return [] },
     },
-  }
-  installVaultRpc(ctx)
-  const result = await ctx.handler(VAULT_ENDPOINTS.delete, { sessionIds: ['missing-1'] })
+  })
+  const result = await handler(VAULT_ENDPOINTS.delete, { sessionIds: ['missing-1'] })
   assert.equal(result.ok, true)
   assert.equal(result.value.results[0].ok, false)
   assert.match(result.value.results[0].error, /not found/)
@@ -188,4 +177,21 @@ test('an unrecognized code is still reported as bad-request', async () => {
   })
   const result = await handler(VAULT_ENDPOINTS.list, {})
   assert.equal(result.error.code, 'bad-request')
+})
+
+test('mounted route refuses a rejected request before dispatch', async () => {
+  const ctx = mountCtx()
+  ctx.connection.requestRejection = () => 403
+  installVaultRpc(ctx)
+  let status = 0
+  let body = ''
+  const res = {
+    writableEnded: false,
+    writeHead(code) { status = code },
+    end(chunk) { this.writableEnded = true; body = chunk ?? '' },
+    on() {},
+  }
+  await ctx.routes[0].handler({ method: 'POST', url: '/x', headers: {} }, res)
+  assert.equal(status, 403)
+  assert.equal(body, 'forbidden')
 })

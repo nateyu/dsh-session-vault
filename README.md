@@ -54,6 +54,6 @@ Restart `dsh web`.
 ## Limits
 
 - Requires the JSONL persistence backend (`dsh web` default). Delete refuses any backend whose `locate()` does not answer `kind: 'jsonl'` with a session-owned directory, so a store with no per-session files (SQLite) or a shared artifact is never removed.
-- Deletes go through Connection RPC with `authority: loopback`, so only the local settings page can call them.
+- Deletes go through Connection RPC; the Host mounts the channel on `webServer` and Connection's browser session still authenticates the request.
 - One `vault.delete` call accepts at most 200 ids.
 - Removing an id from the archive ledger has no published API upstream (`archiveSession` ships without a counterpart), so `lib/registry-compat.js` writes `WorkspaceRegistry` state directly. That write does not run on the registry's own operation queue: a workspace mutation landing in the same instant is reported as `registry-unsupported` rather than silently overwritten. A DSH build that changes those internals fails loud instead of leaving a deleted session archived.

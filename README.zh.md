@@ -54,6 +54,6 @@ dsh plugin --profile web remove dsh-session-vault
 ## 限制
 
 - 需要 JSONL 持久化后端（`dsh web` 默认即是）。只要 `locate()` 返回的不是 `kind: 'jsonl'` 或不是会话独占目录，删除一律拒绝——没有按会话文件的后端（SQLite）和共享产物都不会被删掉。
-- 删除走 Connection RPC，`authority: loopback`，仅本机设置页可调。
+- 删除走 Connection RPC；Host 把通道挂在 `webServer` 上，仍由 Connection 的浏览器会话认证请求。
 - 单次 `vault.delete` 最多接受 200 个 id。
 - 把 id 移出归档账本这件事上游没有公开 API（`archiveSession` 没有反向操作），所以 `lib/registry-compat.js` 直接写 `WorkspaceRegistry` 状态。该写入不在 registry 自己的操作队列上：同一瞬间落地的工作区变更会以 `registry-unsupported` 报出来，而不是被静默覆盖。DSH 若改动这些内部字段，插件会明确失败，而不是留下一个「日志已删但仍归档」的会话。

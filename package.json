@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-vault",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DeepSeek Harness settings page to list and delete archived or blank sessions, including @ mention candidates.",
   "type": "module",
   "main": "lib/index.js",
